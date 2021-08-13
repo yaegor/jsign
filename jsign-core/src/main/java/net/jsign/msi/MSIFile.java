@@ -76,7 +76,8 @@ public class MSIFile implements Signable, Closeable {
     private static final String DIGITAL_SIGNATURE_ENTRY_NAME = "\u0005DigitalSignature";
     private static final String MSI_DIGITAL_SIGNATURE_EX_ENTRY_NAME = "\u0005MsiDigitalSignatureEx";
 
-    private final POIFSFileSystem fs;
+    private final POIFSFileSystem fsRead;
+    private final POIFSFileSystem fsWrite;
     private SeekableByteChannel channel;
 
     /**
@@ -99,7 +100,8 @@ public class MSIFile implements Signable, Closeable {
      * @throws IOException if an I/O error occurs
      */
     public MSIFile(File file) throws IOException {
-        this.fs = new POIFSFileSystem(file, false);
+        this.fsRead = new POIFSFileSystem(file, true);
+        this.fsWrite = new POIFSFileSystem(file, false);
     }
 
     /**
@@ -113,7 +115,8 @@ public class MSIFile implements Signable, Closeable {
         InputStream in = new FilterInputStream(Channels.newInputStream(channel)) {
             public void close() { }
         };
-        this.fs = new POIFSFileSystem(in);
+        this.fsRead = new POIFSFileSystem(in);
+        this.fsWrite = new POIFSFileSystem(in);
     }
 
     /**
@@ -122,9 +125,16 @@ public class MSIFile implements Signable, Closeable {
      * @throws IOException if an I/O error occurs
      */
     public void close() throws IOException {
-        fs.close();
-        if (channel != null) {
-            channel.close();
+        try {
+            fsRead.close();
+        } finally {
+            try {
+                fsWrite.close();
+            } finally {
+                if (channel != null) {
+                    channel.close();
+                }
+            }
         }
     }
 
@@ -136,7 +146,7 @@ public class MSIFile implements Signable, Closeable {
      */
     public boolean hasExtendedSignature() {
         try {
-            fs.getRoot().getEntry(MSI_DIGITAL_SIGNATURE_EX_ENTRY_NAME);
+            fsRead.getRoot().getEntry(MSI_DIGITAL_SIGNATURE_EX_ENTRY_NAME);
             return true;
         } catch (FileNotFoundException e) {
             return false;
@@ -146,7 +156,7 @@ public class MSIFile implements Signable, Closeable {
     private List<Property> getSortedProperties() {
         List<Property> entries = new ArrayList<>();
         
-        append(fs.getPropertyTable().getRoot(), entries);
+        append(fsRead.getPropertyTable().getRoot(), entries);
         
         return entries;
     }
@@ -175,7 +185,7 @@ public class MSIFile implements Signable, Closeable {
                 continue;
             }
 
-            POIFSDocument document = new POIFSDocument((DocumentProperty) property, fs);
+            POIFSDocument document = new POIFSDocument((DocumentProperty) property, fsRead);
             long remaining = document.getSize();
             for (ByteBuffer buffer : document) {
                 int size = buffer.remaining();
@@ -187,7 +197,7 @@ public class MSIFile implements Signable, Closeable {
 
         // hash the package ClassID, in serialized form
         byte[] classId = new byte[16];
-        fs.getRoot().getStorageClsid().write(classId, 0);
+        fsWrite.getRoot().getStorageClsid().write(classId, 0);
         digest.update(classId);
         
         return digest.digest();
@@ -209,7 +219,7 @@ public class MSIFile implements Signable, Closeable {
         List<CMSSignedData> signatures = new ArrayList<>();
 
         try {
-            DocumentEntry digitalSignature = (DocumentEntry) fs.getRoot().getEntry(DIGITAL_SIGNATURE_ENTRY_NAME);
+            DocumentEntry digitalSignature = (DocumentEntry) fsRead.getRoot().getEntry(DIGITAL_SIGNATURE_ENTRY_NAME);
             if (digitalSignature != null) {
                 byte[] signatureBytes = IOUtils.toByteArray(new DocumentInputStream(digitalSignature));
                 try {
@@ -242,16 +252,16 @@ public class MSIFile implements Signable, Closeable {
     @Override
     public void setSignature(CMSSignedData signature) throws IOException {
         byte[] signatureBytes = signature.toASN1Structure().getEncoded("DER");
-        fs.getRoot().createOrUpdateDocument(DIGITAL_SIGNATURE_ENTRY_NAME, new ByteArrayInputStream(signatureBytes));
+        fsWrite.getRoot().createOrUpdateDocument(DIGITAL_SIGNATURE_ENTRY_NAME, new ByteArrayInputStream(signatureBytes));
     }
 
     @Override
     public void save() throws IOException {
         if (channel == null) {
-            fs.writeFilesystem();
+            fsWrite.writeFilesystem();
         } else {
             channel.position(0);
-            fs.writeFilesystem(Channels.newOutputStream(channel));
+            fsWrite.writeFilesystem(Channels.newOutputStream(channel));
             channel.truncate(channel.position());
         }
     }
